@@ -10,6 +10,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp/reverseproxy"
+	"go.uber.org/zap"
 )
 
 type AWSConfig struct {
@@ -32,11 +33,11 @@ type AWSClient struct {
 	clientEC2 *ec2.Client
 
 	asgName       string
-	withInservice bool
+	withInService bool
+	logger        *zap.Logger
 }
 
-func New(ctx context.Context, awsconfig *AWSConfig) (*AWSClient, error) {
-
+func New(ctx context.Context, awsconfig *AWSConfig, logger *zap.Logger) (*AWSClient, error) {
 	cfg, err := config.LoadDefaultConfig(ctx,
 		config.WithSharedConfigProfile(awsconfig.Profile),
 		config.WithRegion(awsconfig.Region),
@@ -50,7 +51,8 @@ func New(ctx context.Context, awsconfig *AWSConfig) (*AWSClient, error) {
 		clientASG:     autoscaling.NewFromConfig(cfg),
 		clientEC2:     ec2.NewFromConfig(cfg),
 		asgName:       awsconfig.AutoScalingGroupName,
-		withInservice: awsconfig.WithInService,
+		withInService: awsconfig.WithInService,
+		logger:        logger,
 	}, nil
 }
 
@@ -69,16 +71,19 @@ func (awsclient *AWSClient) GetUpstreams(ctx context.Context, port int) ([]*reve
 	if len(result.Reservations) == 0 {
 		return nil, fmt.Errorf("no instances found for autoscaling group")
 	}
+
 	insMap := map[string]string{}
 	for _, reservation := range result.Reservations {
 		for _, instance := range reservation.Instances {
-			insMap[*instance.InstanceId] = *instance.PrivateIpAddress
+			if instance.InstanceId != nil && instance.PrivateIpAddress != nil {
+				insMap[*instance.InstanceId] = *instance.PrivateIpAddress
+			}
 		}
 	}
 
 	upstreams := []*reverseproxy.Upstream{}
 
-	if awsclient.withInservice {
+	if awsclient.withInService {
 		for _, privateIpAddress := range awsclient.getInServiceInstances(ctx, insMap) {
 			upstreams = append(upstreams, &reverseproxy.Upstream{
 				Dial: fmt.Sprintf("%s:%d", privateIpAddress, port),
@@ -115,7 +120,7 @@ func (awsclient *AWSClient) getInServiceInstances(ctx context.Context, insMap ma
 			return nil
 		}
 		for _, i := range output.AutoScalingInstances {
-			if *i.HealthStatus == "Healthy" {
+			if *i.LifecycleState == "InService" {
 				inServiceIPs = append(inServiceIPs, insMap[*i.InstanceId])
 			}
 		}

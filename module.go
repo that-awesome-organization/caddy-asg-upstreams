@@ -9,6 +9,14 @@ import (
 	"development.thatwebsite.xyz/caddy/asgupstreams/awsclient"
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp/reverseproxy"
+	"go.uber.org/zap"
+)
+
+var (
+	cache = &cachedUpstreams{
+		cachedTill: time.Now().Add(-time.Hour),
+		values:     []*reverseproxy.Upstream{},
+	}
 )
 
 func init() {
@@ -34,7 +42,7 @@ type AutoScalingGroupUpstreams struct {
 
 	awsc *awsclient.AWSClient
 
-	cache *cachedUpstreams
+	logger *zap.Logger
 }
 
 type cachedUpstreams struct {
@@ -52,7 +60,7 @@ func (AutoScalingGroupUpstreams) CaddyModule() caddy.ModuleInfo {
 }
 
 func (au *AutoScalingGroupUpstreams) Provision(ctx caddy.Context) error {
-
+	au.logger = ctx.Logger(au)
 	if au.Provider != "aws" {
 		return fmt.Errorf("invalid provider: %q", au.Provider)
 	}
@@ -66,7 +74,7 @@ func (au *AutoScalingGroupUpstreams) Provision(ctx caddy.Context) error {
 		if err := au.AWSConfig.Validate(); err != nil {
 			return err
 		}
-		if awsc, err := awsclient.New(ctx, au.AWSConfig); err != nil {
+		if awsc, err := awsclient.New(ctx, au.AWSConfig, au.logger); err != nil {
 			return err
 		} else {
 			au.awsc = awsc
@@ -77,23 +85,23 @@ func (au *AutoScalingGroupUpstreams) Provision(ctx caddy.Context) error {
 }
 
 func (au *AutoScalingGroupUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream, error) {
-	// if cache is still valid
-	if au.cache.cachedTill.After(time.Now()) {
-		return au.cache.values, nil
+	// if cache is still valid use the same
+	if cache.cachedTill.After(time.Now()) {
+		return cache.values, nil
 	}
 
-	au.cache.mu.Lock()
-	defer au.cache.mu.Unlock()
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
 	if au.awsc != nil {
-		// TODO: add in service as variable
 		upstreams, err := au.awsc.GetUpstreams(r.Context(), au.Port)
 		if err != nil {
+			au.logger.Error("error in GetUpstreams", zap.Error(err))
 			return nil, err
 		}
-		au.cache.cachedTill = time.Now().Add(time.Second * time.Duration(au.CacheIntervalSeconds))
-		au.cache.values = upstreams
+		cache.cachedTill = time.Now().Add(time.Second * time.Duration(au.CacheIntervalSeconds))
+		cache.values = upstreams
 	}
-	return au.cache.values, nil
+	return cache.values, nil
 }
 
 var (

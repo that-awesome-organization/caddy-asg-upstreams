@@ -14,11 +14,18 @@ import (
 )
 
 type AWSConfig struct {
-	Region  string `json:"region,omitempty"`
+	// Region overrides AWS region than default.
+	Region string `json:"region,omitempty"`
+
+	// Profile specifies the profile to use in case of shared credentials.
 	Profile string `json:"profile,omitempty"`
 
+	// AutoScalingGroupName is used to filter the instances by tag value.
 	AutoScalingGroupName string `json:"asg_name,omitempty"`
-	WithInService        bool   `json:"with_in_service,omitempty"`
+
+	// WithInService when set to true will filter instances only with lifecycle
+	// state as InService.
+	WithInService bool `json:"with_in_service,omitempty"`
 }
 
 func (ac *AWSConfig) Validate() error {
@@ -101,30 +108,42 @@ func (awsclient *AWSClient) GetUpstreams(ctx context.Context, port int) ([]*reve
 }
 
 func (awsclient *AWSClient) getInServiceInstances(ctx context.Context, insMap map[string]string) []string {
+
 	maxRecords := 10
 	batches := [][]string{}
 
-	i := 0
+	keys := make([]string, 0, len(insMap))
 	for k := range insMap {
-		if len(batches[i]) == maxRecords {
-			i++
-		}
-		batches[i] = append(batches[i], k)
+		keys = append(keys, k)
 	}
+
+	for i := 0; i < (len(keys)/maxRecords)+1; i++ {
+		last := (i + 1) * maxRecords
+		if last > len(keys) {
+			last = len(keys)
+		}
+		batches = append(batches, keys[i*maxRecords:last])
+	}
+
 	inServiceIPs := []string{}
 	for _, batch := range batches {
 		output, err := awsclient.clientASG.DescribeAutoScalingInstances(ctx, &autoscaling.DescribeAutoScalingInstancesInput{
 			InstanceIds: batch,
 		})
+
 		if err != nil {
+			awsclient.logger.Error("error in describing autoscaling instances", zap.Error(err))
 			return nil
 		}
+
+		awsclient.logger.Debug("described autoscaling instances", zap.Int("instances", len(output.AutoScalingInstances)))
 		for _, i := range output.AutoScalingInstances {
-			if *i.LifecycleState == "InService" {
+			if i.LifecycleState != nil && i.InstanceId != nil && *i.LifecycleState == "InService" {
 				inServiceIPs = append(inServiceIPs, insMap[*i.InstanceId])
 			}
 		}
 	}
+	awsclient.logger.Debug("filtered inServiceIPs", zap.Int("inServiceIPs", len(inServiceIPs)))
 
 	return inServiceIPs
 }
